@@ -1,0 +1,9 @@
+<launch>
+
+ <node pkg = "imu_fusion" name = "imu_filter" type = "imu_fusion.py" output = "screen">
+ <rosparam param="timer">5.0</rosparam>
+ <rosparam param="pose_correct_timer">10.0</rosparam>
+ 
+ </node>
+
+</launch>
