@@ -1,9 +1,8 @@
 <launch>
-
- <node pkg = "imu_fusion" name = "imu_filter" type = "imu_fusion.py" output = "screen">
- <rosparam param="timer">5.0</rosparam>
- <rosparam param="pose_correct_timer">10.0</rosparam>
- 
- </node>
-
+  <!-- Zero-velocity pose hold for robot_localization -->
+  <node pkg="imu_fusion" type="imu_fusion.py" name="imu_filter" output="screen">
+    <param name="timer"              value="5.0"/>   <!-- seconds still before latching pose -->
+    <param name="pose_correct_timer" value="10.0"/>  <!-- seconds between resets while still -->
+    <param name="set_pose_service"   value="/set_pose"/>
+  </node>
 </launch>

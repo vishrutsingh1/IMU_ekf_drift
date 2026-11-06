@@ -1,155 +1,83 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+"""
+Zero-velocity pose hold for robot_localization.
+
+While the robot is stationary, IMU bias makes the EKF pose estimate creep.
+This node watches wheel odometry; once the robot has been still for
+`~timer` seconds it latches the current filtered pose and keeps resetting
+the EKF to it (every `~pose_correct_timer` seconds) via the set_pose
+service. When the robot starts moving again it applies one final reset
+and hands control back to the filter.
+
+Subscribes:  odom (nav_msgs/Odometry)                - wheel odometry
+             odometry/filtered (nav_msgs/Odometry)   - robot_localization output
+Calls:       set_pose (robot_localization/SetPose)
+"""
 import rospy
-from robot_localization.srv import ToggleFilterProcessing , ToggleFilterProcessingRequest,SetPose,SetPoseRequest
 from nav_msgs.msg import Odometry
-#from geometry_msgs.msg import PoseWithCovarianceStamped 
-
-
-class IMU_Filter(object):
-
-	def __init__(self):
-		self.time_then = rospy.get_rostime()
-		self.time_now = 0
-		self.switch = 0
-		self.sub_odom = rospy.Subscriber("odom",Odometry,self.odom_callback)
-		self.sub_odom_filter = rospy.Subscriber("odometry/filtered",Odometry,self.odom_filter_callback)
-		##self.pose_pub = rospy.Publisher("set_pose" ,PoseWithCovariance,queue_size = 5)
-		rospy.wait_for_service("/ekf_se/toggle")
-		rospy.wait_for_service("/set_pose")
-		self.toggle_service = rospy.ServiceProxy("/ekf_se/toggle",ToggleFilterProcessing)
-		self.pose_service =   rospy.ServiceProxy("/set_pose",SetPose)
-		self.toggle_request = ToggleFilterProcessingRequest()
-		self.pose = SetPoseRequest() 
-		self.linear_vel = 0
-		self.angular_vel = 0
-		self.time = 0
-		self.pos_time = 0
-		self.pos_time_then = rospy.get_rostime()
-		self.pos_time_now = 0
-		self.timer = rospy.get_param('~timer' , 5.0)
-		self.pose_correct_timer = rospy.get_param('~pose_correct_timer' , 10.0)
-		rospy.loginfo(self.timer)
-		rospy.loginfo(self.pose_correct_timer)
-
-
-
-
-	#def halt_service(self):
-		
-	#	self.toggle_request.on = False
-	#	self.toggle_service(self.toggle_request)
-	#	rospy.loginfo("halt state")
-
-	#def start_service(self):
-		
-	#	self.toggle_request.on = True
-	#	self.toggle_service(self.toggle_request)
-	#	rospy.loginfo("active state")
-
-
-
-
-
-
-
-
-
-	def odom_callback(self,msg):
-		self.linear_vel = abs(msg.twist.twist.linear.x)
-		self.angular_vel = abs(msg.twist.twist.angular.z)
-		self.pose_time_now = rospy.Time.now()
-		self.pos_time = self.pose_time_now.secs - self.pos_time_then.secs
-		
-
-		
-
-
-
-		if(self.linear_vel == 0.00  and self.angular_vel == 0.00):
-			self.time_now = rospy.get_rostime()
-			self.time =  self.time_now.secs - self.time_then.secs
-			
-
-			
-
-		if(self.linear_vel != 0.00 or self.angular_vel != 0.00):
-			self.time_then = rospy.Time.now()
-
-		
-		
-		if(self. switch== 1 and (self.linear_vel != 0.00 or self.angular_vel != 0.00)):
-			#self.start_service()
-			self.pose.pose.header.stamp = rospy.Time.now()
-			self.pose_service(self.pose)
-			rospy.loginfo("pose corrected !")
-			self.switch = 0
-			self.time = 0
-			print("start")
-
-		if (self.time >= self.timer and self.switch == 0):
-			#self.halt_service()
-			self.pos_time_then = rospy.get_rostime()
-			self.pos_time = 0
-			self.switch = 1
-			print("stop")
-
-		if(self.switch == 1  and self.pos_time >= self.pose_correct_timer):
-			self.pose.pose.header.stamp = rospy.Time.now()
-			self.pose_service(self.pose)
-			self.pos_time = 0
-			self.pos_time_then = rospy.get_rostime()
-			rospy.loginfo("pose corrected !")
-
-
-
-
-
-	def odom_filter_callback(self,data):
-
-		if(self.switch == 0 and (self.linear_vel == 0.00  and self.angular_vel == 0.00)):
-
-			self.pose.pose.header.frame_id = "odom"
-			self.pose.pose.pose.pose = data.pose.pose
-			self.pose.pose.pose.covariance = data.pose.covariance  	
-			
-
-
-
-
-
-	
-
-
-	
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-if __name__ == '__main__':
-	try:
-		rospy.init_node("imu_filter_toggle")
-		obj = IMU_Filter()
-	except rospy.ROSInterruptException:
-		pass
-		
-	rospy.spin()
+from robot_localization.srv import SetPose, SetPoseRequest
+
+
+class ZeroVelocityPoseHold(object):
+
+    def __init__(self):
+        self.still_timeout = rospy.get_param("~timer", 5.0)
+        self.correct_period = rospy.get_param("~pose_correct_timer", 10.0)
+        set_pose_srv = rospy.get_param("~set_pose_service", "/set_pose")
+
+        self.holding = False                 # True while the pose is latched
+        self.is_still = False
+        self.last_motion_time = rospy.Time.now()
+        self.last_correction_time = rospy.Time.now()
+        self.latched = SetPoseRequest()
+
+        rospy.loginfo("Waiting for %s ...", set_pose_srv)
+        rospy.wait_for_service(set_pose_srv)
+        self.set_pose = rospy.ServiceProxy(set_pose_srv, SetPose)
+
+        rospy.Subscriber("odom", Odometry, self.odom_cb)
+        rospy.Subscriber("odometry/filtered", Odometry, self.filtered_cb)
+        rospy.loginfo("Pose hold ready: still_timeout=%.1fs, correct_period=%.1fs",
+                      self.still_timeout, self.correct_period)
+
+    def apply_correction(self):
+        self.latched.pose.header.stamp = rospy.Time.now()
+        self.set_pose(self.latched)
+        self.last_correction_time = rospy.Time.now()
+        rospy.loginfo("Pose corrected")
+
+    def odom_cb(self, msg):
+        now = rospy.Time.now()
+        self.is_still = (msg.twist.twist.linear.x == 0.0 and msg.twist.twist.angular.z == 0.0)
+
+        if not self.is_still:
+            self.last_motion_time = now
+            if self.holding:                 # robot started moving: final reset, release
+                self.apply_correction()
+                self.holding = False
+                rospy.loginfo("Motion detected - pose hold released")
+            return
+
+        still_for = (now - self.last_motion_time).to_sec()
+        if not self.holding and still_for >= self.still_timeout:
+            self.holding = True              # latch the most recent filtered pose
+            self.last_correction_time = now
+            rospy.loginfo("Stationary for %.1fs - pose hold engaged", still_for)
+        elif self.holding and (now - self.last_correction_time).to_sec() >= self.correct_period:
+            self.apply_correction()
+
+    def filtered_cb(self, msg):
+        # Keep updating the candidate pose until the hold is engaged
+        if not self.holding and self.is_still:
+            self.latched.pose.header.frame_id = msg.header.frame_id or "odom"
+            self.latched.pose.pose.pose = msg.pose.pose
+            self.latched.pose.pose.covariance = msg.pose.covariance
+
+
+if __name__ == "__main__":
+    rospy.init_node("imu_filter_toggle")
+    try:
+        ZeroVelocityPoseHold()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
